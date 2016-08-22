@@ -1,0 +1,689 @@
+---
+title: "Talking Battle of Smart Phones"
+author: "Aditya Gore"
+date: "July 21, 2016"
+output: 
+  html_document:
+    toc: TRUE
+---
+#Talking Data - Battle of Smart Phones
+
+```{r,echo=FALSE}
+suppressPackageStartupMessages({
+  library(Matrix);
+  library(data.table);
+  library(dplyr);
+  library(tidyr);
+  library(ggplot2)
+})
+options(encoding="UTF-8")
+```
+
+
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+train <- fread("gender_age_train.csv",colClasses = c("character","factor","integer","factor"))
+setkey(train,"device_id")
+```
+
+#Benchmark performance
+## Equal weights to all the groups
+```{r logloss,echo=FALSE}
+MultiLogLoss <- function(act, pred){
+      eps <- 1e-15;
+      nr <- nrow(pred)
+      pred <- pmin(pmax(pred,eps),1-eps)
+      ll <- sum(act*log(pred))
+      ll <- -ll/nr     
+      return(ll);
+}
+```
+
+
+```{r deterministic,echo=FALSE}
+target_groups <- sort(unique(train[,group]))
+observed_values <- dcast(train[,.(device_id,adjacency=1,group)],device_id~group,value.var = "adjacency",fill=0,drop=FALSE) %>% select(-device_id) %>% as.matrix()
+predict_bench1 <- matrix(1,nrow = train[,.N],ncol=length(target_groups))/length(target_groups)
+```
+
+The benchmark logloss value is `r MultiLogLoss(observed_values,predict_bench1)`.
+
+## Random guess
+```{r random,echo=FALSE,eval=FALSE}
+folds <- 10
+obs <- sample(c(1:folds),train[,.N],replace = TRUE)
+predict_bench2 <- matrix(0,nrow=train[,.N],ncol=n_distinct(train[,group]))
+for(i in 1:folds){
+  predict_bench2[which(obs==i),] <- rep(gtools::rdirichlet(1,rep(1,length(target_groups))),each=sum(obs==i))
+}
+```
+
+
+#Demographic features
+## Distribution by Groups
+```{r graphs,echo=FALSE,fig.align="c",fig.width=8,fig.height=4}
+gender_label <- c("F"="Female","M"="Male")
+train %>% ggplot(aes(x=group))+geom_bar(color="darkblue",fill="darkorange")+facet_wrap(~gender,scales="free_x",labeller=labeller(gender=gender_label) )+theme_bw()+theme(strip.background=element_rect(fill=alpha("orange1",0.5)))+labs(x="Groups",y="Number of devices")
+```
+
+## Distribuiton by Gender
+```{r graph2, echo=FALSE,fig.align="c",fig.width=8,fig.height=4}
+train %>% ggplot(aes(x=gender))+geom_bar(color="darkblue",fill="darkorange")+theme_bw()+scale_x_discrete(labels=c("F"="Female","M"="Male"))+labs(x="Gender",y="Number of devices")+coord_flip()
+```
+
+## Distribuiton by Age
+```{r graph3, echo=FALSE,fig.align="c",fig.width=8,fig.height=4}
+train %>% ggplot(aes(x=age))+geom_bar(aes(y=..prop..),color="darkblue",fill="darkorange",alpha=0.75)+geom_density(color="darkgreen",lwd=1,lty=2)+facet_wrap(~gender,labeller=labeller(gender=gender_label))+theme_bw()+theme(strip.background=element_rect(fill="orange1"))+labs(x="Age",y="Proportion of devices")
+```
+
+This distribution of device across age group for two genders appear to be same.
+
+# Prediction using demographic features
+
+## Simple count of groups
+```{r,echo=FALSE}
+folds <- 10
+obs <- sample(c(1:folds),train[,.N],replace = TRUE)
+predict_bench3 <- matrix(0,nrow=train[,.N],ncol=n_distinct(train[,group]))
+for(i in 1:folds){
+  prob <- train[which(obs!=i),.N,by=group][match(target_groups,group),N]
+  prob <- prob/sum(prob)
+  predict_bench3[which(obs==i),] <- rep(prob,each=sum(obs==i))
+}
+```
+This method results in the logloss of `r MultiLogLoss(observed_values,predict_bench3)`.
+
+# Using Brand information
+
+```{r, echo=FALSE,warning=FALSE,message=FALSE}
+brand <- fread("phone_brand_device_model.csv",colClasses = c("character","character","character"),encoding = "UTF-8")
+duplicate_entries <- brand[duplicated(brand),device_id]
+```
+There are `r length(duplicate_entries)` pure duplicate entries in the brand file.
+
+
+```{r, echo=FALSE,warning=FALSE,message=FALSE}
+brand <- unique(brand) 
+setkey(brand,"device_id")
+duplicate_devices <- brand[,.N,by=device_id][N>1,device_id]
+```
+
+After removing those duplicate entries there remain `r length(duplicate_devices)` duplicate devices.
+
+```{r,echo=FALSE,results="asis"}
+# rmarkdown::render(encoding="UTF-8")
+brand_duplicates <- brand[duplicate_devices]
+brand_duplicates[,phone_brand_model:=paste0(phone_brand," ",device_model)][,':='(phone_brand=NULL,device_model=NULL)]
+brand_duplicates[,brand:=1]
+brand_duplicates[,brand:=cumsum(brand),by=device_id]
+brand_duplicates[,brand:= paste0("Brand"," ",brand)]
+# brand_duplicates.copy <- brand_duplicates[,.(device_id,brand, phone_brand_model=paste0(phone_brand," ",device_model))]
+print(xtable::xtable(dcast(brand_duplicates,device_id~brand,value.var = "phone_brand_model"),align="plcc"),type="html",include.rownames=FALSE)
+
+# knitr::kable(dcast(brand_duplicates,device_id~brand,value.var = "phone_brand_model"))
+```
+
+As pointed out by ``dune_dweller'' there are multiple phone models that carry the same type of device models.
+
+```{r,echo=FALSE,results="asis"}
+print(xtable::xtable(brand[,.(unique_brands=n_distinct(phone_brand)),by=device_model][,.(devices=.N),by=unique_brands][order(-devices)],align="ccc"),type="html",include.rownames=FALSE)
+```
+
+Therefore the device models are prefixed with phone brand to create unique identifiers for the models. Only one device from this multiple brands will be kept for the purpose of this analysis.
+
+```{r,echo=FALSE}
+brand[,device_model := paste0(phone_brand," ",device_model)]
+brand <- unique(brand)
+train_brand <- merge(train,brand,by="device_id",all.x=TRUE)
+```
+
+## Number of unique brands by groups
+
+```{r brandgraph,echo=FALSE,fig.align="c",fig.width=8,fig.height=4}
+train_brand[,.(brands=n_distinct(phone_brand)),by=.(group,gender)] %>% ggplot(aes(x=group,y=brands))+geom_bar(stat="identity",color="darkblue",fill="darkorange")+facet_wrap(~gender,scales="free_x",labeller = labeller(gender=c("F"="Female","M"="Male")))+labs(x="Group",y="Number of brands")+theme_bw()+theme(strip.background=element_rect(fill=alpha("orange",0.5)))
+```
+
+## Number of unique models by groups
+
+```{r devicegraph,echo=FALSE,fig.align="c",fig.width=8,fig.height=4}
+train_brand[,.(devices=n_distinct(device_model)),by=.(group,gender)] %>% ggplot(aes(x=group,y=devices))+geom_bar(stat="identity",color="darkblue",fill="darkorange")+facet_wrap(~gender,scales="free_x",labeller = labeller(gender=c("F"="Female","M"="Male")))+labs(x="Group",y="Number of devices")+theme_bw()+theme(strip.background=element_rect(fill=alpha("orange",0.5)))
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+top10_brand_overall <- train_brand[,.N,by=phone_brand][order(-N)][1:10,phone_brand]
+
+top10_brand_male <- train_brand[gender=="M",.N,by=phone_brand][order(-N)][1:10,phone_brand]
+
+top10_brand_female <- train_brand[gender=="F",.N,by=phone_brand][order(-N)][1:10,phone_brand]
+
+
+top10_device_overall <- train_brand[,.N,by=device_model][order(-N)][1:10,device_model]
+
+top10_device_male <- train_brand[gender=="M",.N,by=device_model][order(-N)][1:10,device_model]
+
+top10_device_female <- train_brand[gender=="F",.N,by=device_model][order(-N)][1:10,device_model]
+
+```
+
+```{r,echo=FALSE,fig.align="c",fig.width=8,fig.height=4,warning=FALSE,message=FALSE}
+brand_numbers <- train_brand[,.N,by=phone_brand][order(-N)]
+brand_numbers[,prop:=N/sum(N)]
+brand_numbers[,cumprop:=cumsum(prop)]
+brand_numbers %>% ggplot(aes(x=1:nrow(brand_numbers),y=cumprop))+geom_line()+geom_hline(yintercept = 0.9,color="red",lty=2)+theme_bw()+scale_x_continuous(breaks=seq(0,125,5))+labs(x="Number of brands",y="Proportion of market share")+geom_vline(xintercept = which(brand_numbers[,cumprop]<0.9) %>% tail(1),color="red",lty=2)
+```
+
+```{r,echo=FALSE,fig.align="c",fig.width=8,fig.height=4,warning=FALSE,message=FALSE}
+device_numbers <- train_brand[,.N,by=device_model][order(-N)]
+device_numbers[,prop:=N/sum(N)]
+device_numbers[,cumprop:=cumsum(prop)]
+device_numbers %>% ggplot(aes(x=1:nrow(device_numbers),y=cumprop))+geom_line()+geom_hline(yintercept = 0.9,color="red",lty=2)+theme_bw()+scale_x_continuous(breaks=seq(0,1500,100))+labs(x="Number of devices",y="Proportion of market share")+geom_vline(xintercept = which(device_numbers[,cumprop]<0.9) %>% tail(1),color="red",lty=2)
+```
+
+## Distribution of top 10 brands by gender
+
+```{r,echo=FALSE,fig.align="c",fig.width=8,fig.height=6,warning=FALSE,message=FALSE}
+relabel_type <- function(x,typelist){
+  ifelse(x%in%typelist,x,"other")
+}
+
+match_custom <- function(x,y,...){
+  temp <- match(x,y,...)
+  temp[is.na(temp)] <- length(y)+1
+  return(temp)
+}
+
+cbbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+gender_color <- cbbPalette[6:7]
+
+top10_brand_male_ratio <- train_brand[phone_brand%in%top10_brand_overall,.(maleprop=sum(gender=="M")/.N),by=phone_brand][order(-maleprop),phone_brand]
+
+train_brand[phone_brand %in% top10_brand_overall] %>% ggplot(aes(x=reorder(phone_brand,match(phone_brand,top10_brand_male_ratio))))+geom_bar(aes(fill=factor(gender,labels = c("F"="Female","M"="Male"))),width=0.98,position="fill")+scale_fill_manual(values=gender_color)+theme_bw()+guides(fill=guide_legend("Gender",reverse=TRUE))+labs(x="Top 10 Brands",y="Proportion")+theme(axis.text.x=element_text(angle = 315,hjust=-0.01))
+
+```
+
+
+## Distribution of top 10 brands across age
+
+```{r,echo=FALSE,fig.align="c",fig.width=10,fig.height=4,warning=FALSE,message=FALSE}
+createColors <- grDevices::colorRampPalette(RColorBrewer::brewer.pal(9,"Set1"),interpolate="spline")
+
+train_brand[phone_brand %in% top10_brand_overall] %>% ggplot(aes(x=age))+geom_bar(aes(fill=reorder(phone_brand,match(phone_brand,top10_brand_overall))),position = "fill",width = 1)+theme_bw()+facet_wrap(~gender,scales="free_y",labeller=labeller(gender=gender_label))+guides(fill=guide_legend("Top 10 Brands",reverse = TRUE))+scale_fill_manual(values=createColors(10))+scale_x_continuous(breaks=seq(10,80,5),limits = c(10,80))+theme(strip.background=element_rect(fill=alpha("orange1",0.5)))+labs(x="Age",y="Proportion")
+```
+
+It appears that the top 3 brands (`r paste0(top10_brand_overall[1:3],collapse=", ")`) are more popular in younger generation and rest of the top 10 are more popular in really younger or older population.
+
+## Distribution across target groups
+
+```{r,echo=FALSE,echo=FALSE,fig.align="c",fig.width=10,fig.height=4,warning=FALSE,message=FALSE}
+train_brand[phone_brand %in% top10_brand_overall] %>% ggplot(aes(x=reorder(group,match(group,target_groups))))+geom_bar(aes(fill=reorder(phone_brand,match(phone_brand,top10_brand_overall))),position = "fill",width = 1)+theme_bw()+facet_wrap(~gender,scales="free_x",labeller=labeller(gender=gender_label))+guides(fill=guide_legend("Top 10 Brands",reverse = TRUE))+scale_fill_manual(values=createColors(10))+theme(strip.background=element_rect(fill=alpha("orange1",0.5)))+labs(x="Groups",y="Proportion")
+```
+
+The distribution of top 10 brands show a pattern across these groups.
+
+## Prediction using phone brands:
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+setClassUnion("tableORframe",c("data.table","data.frame"))
+
+feature_model <- setClass(
+  Class = "FeatureModel",
+  slots = c(
+    target="character",
+    features="character",
+    model.data = "tableORframe",
+    prior.prob = "tableORframe",
+#     prior.weight="numeric",
+    prob.fit="tableORframe"
+  ),
+  prototype=list(
+    prob.fit=data.table(),
+    prior.prob=data.table()
+  ),
+  validity=function(object){
+    # if(object@prior.weight<0) return("Please use nonnegative prior weights")
+    if(sum(object@target %in% names(object@model.data))<length(object@target)) return("Target variable not found in the data")
+    if(sum(object@features %in% names(object@model.data))<length(object@features)) return("Feature variable not found in the data")
+    return(TRUE)
+  }
+)
+setGeneric(
+  name = "probfit",
+  def = function(object,prior.prob,prior.weight){
+    standardGeneric("probfit")
+  }
+)
+setMethod(
+  f="probfit",
+  signature = "FeatureModel",
+  definition = function(object,prior.prob,prior.weight){
+    object@prior.prob=prior.prob
+    filter <- paste0("order(",paste0(c(object@target,object@features),collapse=","),")")
+    prob <- object@model.data[,.N,by=c(object@target,object@features)][eval(parse(text=filter))]
+    prob[,prob:=prior.prob[eval(parse(text=object@target)),prob]*prior.weight]
+    prob[,prob:=(N+prob)/(sum(N)+sum(prob)),by=c(object@features)]
+    
+    # prob <- prob[,prob:=(N+prior.prob[eval(parse(text=object@target))]*prior.weight)/(sum(N)+prior.weight),by=object@features]
+    # prob[,prob:=N/sum(N),by=object@features]
+    casting <- paste0(paste0(object@features,collapse = "+"),"~",object@target)
+    object@prob.fit <- dcast(prob,eval(parse(text=casting)),value.var="prob",drop=FALSE,fill=0)
+    setkeyv(object@prob.fit,object@features)
+    return(object)
+  }
+)
+
+setGeneric(
+  name = "predict.featuremodel",
+  def = function(object,predict.data){
+    standardGeneric("predict.featuremodel")
+  }
+)
+setMethod(
+  f="predict.featuremodel",
+  signature = "FeatureModel",
+  definition = function(object,predict.data){
+    colnames <- names(object@prob.fit)
+    colnames <- colnames[!colnames%in%object@features]
+    predict.data <- merge(predict.data,object@prob.fit,by=object@features,all.x=TRUE)
+    prediction <- as.matrix(predict.data[,colnames,with=FALSE])
+    na.index <- unique(which(is.na(prediction),arr.ind = TRUE)[,1])
+    prediction[na.index,] <- rep(object@prior.prob[,prob],each=length(na.index))
+    return(prediction)
+  }
+)
+array.weight <- list()
+for(weights in seq(0,100,5)){
+folds <- 10
+obs <- sample(c(1:folds),train[,.N],replace = TRUE)
+predict_bench4 <- matrix(0,nrow=train[,.N],ncol=n_distinct(train[,group]))
+for(i in 1:folds){
+  ftrain <- train_brand[which(obs!=i),]
+  ftest <- train_brand[which(obs==i),]
+  model_brand <- feature_model(model.data=ftrain,target="group",features="phone_brand")
+  model_brand <- probfit(model_brand,prior.prob = setkey(ftrain[,.N,by=group][,prob:=N/sum(N)],"group"),prior.weight = weights)
+  predict_bench4[which(obs==i),] <- predict.featuremodel(model_brand,ftest)
+}
+array.weight[[as.character(weights)]]<- MultiLogLoss(observed_values,predict_bench4)
+}
+
+```
+
+
+```{r naivebayes,echo=FALSE,warning=FALSE,message=FALSE}
+folds <- 10
+obs <- sample(c(1:folds),train[,.N],replace = TRUE)
+predict_bench5 <- matrix(0,nrow=train[,.N],ncol=n_distinct(train[,group]))
+
+for(i in 1:folds){
+  ftrain <- train_brand[which(obs!=i),]
+  ftest <- train_brand[which(obs==i),]
+  prob_brand_group <- ftrain[,.N,by=.(phone_brand,group)]
+  prob_brand_group[,prob:=N/sum(N),by=group]
+  prob_group <- ftrain[,.N,by=group]
+  prob_group[,prob:=N/sum(N)]
+  prob_brand <- ftrain[,.N,by=phone_brand]
+  prob_brand[,prob:=N/sum(N)]
+  setkeyv(prob_brand_group,c("phone_brand","group"))
+  setkey(prob_group,"group")
+  setkey(prob_brand,"phone_brand")
+  prob_brand_group[,post_prob:=prob*prob_group[group,prob]/prob_brand[phone_brand,prob]]
+  prob_brand_group <- dcast(prob_brand_group,phone_brand~group,value.var = "post_prob")
+  prob_brand_group[,nna:=sum(is.na(.SD)),.SDcols=-c("phone_brand"),by=1:nrow(prob_brand_group)]
+  for(name in names(prob_brand_group)[c(-1,-14)]){
+    prob_brand_group[nna<12&is.na(get(name)),name:=0,with=FALSE]
+    prob_brand_group[nna==12&is.na(get(name)),name:=prob_group[name,prob],with=FALSE]
+    prob_brand_group
+  }
+  setkey(prob_brand_group,"phone_brand")
+  post_prob <- prob_brand_group[ftest[,phone_brand]]
+  setkey(post_prob,"phone_brand")
+  post_prob[,nna:=NULL]
+  for(name in names(post_prob)[-1]){
+    post_prob[is.na(get(name)),name:=prob_group[name,prob],with=FALSE]
+  }
+  predict_bench5[which(obs==i),] <- post_prob[,-1,with=FALSE]%>%as.matrix()
+}
+
+MultiLogLoss(observed_values,predict_bench5)
+
+
+```
+
+
+```{r naivebayesmodel,echo=FALSE,warning=FALSE,message=FALSE}
+folds <- 10
+obs <- sample(c(1:folds),train[,.N],replace = TRUE)
+predict_bench8 <- matrix(0,nrow=train[,.N],ncol=n_distinct(train[,group]))
+
+for(i in 1:folds){
+  ftrain <- train_brand[which(obs!=i),]
+  ftest <- train_brand[which(obs==i),]
+  phone_model_group <- ftrain[,.N,by=.(device_model,group)]
+  phone_model_group[,prob:=N/sum(N),by=group]
+  prob_group <- ftrain[,.N,by=group]
+  prob_group[,prob:=N/sum(N)]
+  prob_device <- ftrain[,.N,by=device_model]
+  prob_device[,prob:=N/sum(N)]
+  setkeyv(phone_model_group,c("device_model","group"))
+  setkey(prob_group,"group")
+  setkey(prob_device,"device_model")
+  phone_model_group[,post_prob:=prob*prob_group[group,prob]/prob_device[device_model,prob]]
+  phone_model_group <- dcast(phone_model_group,device_model~group,value.var = "post_prob")
+  phone_model_group[,nna:=sum(is.na(.SD)),.SDcols=-c("device_model"),by=1:nrow(phone_model_group)]
+  for(name in names(phone_model_group)[c(-1,-14)]){
+    phone_model_group[nna<12&is.na(get(name)),name:=0,with=FALSE]
+    phone_model_group[nna==12&is.na(get(name)),name:=prob_group[name,prob],with=FALSE]
+    phone_model_group
+  }
+  setkey(phone_model_group,"device_model")
+  post_prob <- phone_model_group[ftest[,device_model]]
+  setkey(post_prob,"device_model")
+  post_prob[,nna:=NULL]
+  for(name in names(post_prob)[-1]){
+    post_prob[is.na(get(name)),name:=prob_group[name,prob],with=FALSE]
+  }
+  predict_bench8[which(obs==i),] <- post_prob[,-1,with=FALSE]%>%as.matrix()
+}
+
+MultiLogLoss(observed_values,predict_bench8)
+```
+
+
+```{r naiveBayes2,echo=FALSE,warning=FALSE,message=FALSE}
+folds <- 10
+obs <- sample(c(1:folds),train[,.N],replace = TRUE)
+predict_bench6 <- matrix(0,nrow=train[,.N],ncol=n_distinct(train[,group]))
+for(i in 1:folds){
+  ftrain <- train_brand[which(obs!=i),]
+  ftest <- train_brand[which(obs==i),]
+  prob_group <- ftrain[,.N,by=group]
+  prob_group[,prob:=N/sum(N)]
+  setkey(prob_group,"group")
+  # naive.model <- e1071::naiveBayes(formula=group~phone_brand,data=data.frame(ftrain[,.(group,phone_brand)]))
+  naive.model <- e1071::naiveBayes(model.matrix(~phone_brand-1,data = ftrain),factor(ftrain[,group]),laplace=100)
+  predict_bench6[which(obs==i),] <- e1071:::predict.naiveBayes(naive.model,newdata=model.matrix(~phone_brand-1,data=ftest),type="raw")
+  na.rows <- unique(which(is.na(predict_bench6[which(obs==i),]),arr.ind = TRUE)[,1])
+  predict_bench6[which(obs==i),][na.rows,] <- rep(prob_group[,prob],each=length(na.rows))
+}
+
+```
+
+With the naive bayes approach we get a logloss value of `r MultiLogLoss(observed_values,predict_bench6)` and there does not appear to be a significant improvment by not including the brand.
+
+```{r naiveBayes3,echo=FALSE,warning=FALSE,message=FALSE}
+folds <- 10
+obs <- sample(c(1:folds),train[,.N],replace = TRUE)
+predict_bench7 <- matrix(0,nrow=train[,.N],ncol=n_distinct(train[,group]))
+for(i in 1:folds){
+  ftrain <- train_brand[which(obs!=i),]
+  ftest <- train_brand[which(obs==i),]
+  prob_group <- ftrain[,.N,by=group]
+  prob_group[,prob:=N/sum(N)]
+  setkey(prob_group,"group")
+  naive.model <- e1071::naiveBayes(formula=group~device_model,data=data.frame(ftrain[,.(group,device_model)]))
+  predict_bench7[which(obs==i),] <- e1071:::predict.naiveBayes(naive.model,newdata=ftest[,.(group,device_model)],type="raw")
+  na.rows <- unique(which(is.na(predict_bench7[which(obs==i),]),arr.ind = TRUE)[,1])
+  predict_bench7[which(obs==i),][na.rows,] <- rep(prob_group[,prob],each=length(na.rows))
+}
+
+```
+
+
+```{r dtree,echo=FALSE,warning=FALSE,message=FALSE}
+folds <- 10
+obs <- sample(c(1:folds),train[,.N],replace = TRUE)
+predict_bench9 <- matrix(0,nrow=train[,.N],ncol=n_distinct(train[,group]))
+phone_levels <- levels(factor(train_brand[,phone_brand]))
+for(i in 1:folds){
+  ftrain <- train_brand[which(obs!=i),]
+  ftrain.frame <- data.frame(ftrain[,.(group,phone_brand)])%>%mutate(group=factor(group),phone_brand=factor(phone_brand,levels=phone_levels))
+  ftest <- train_brand[which(obs==i),]
+  ftest.frame <- data.frame(ftest[,.(group,phone_brand)])%>%mutate(group=factor(group),phone_brand=factor(phone_brand,levels=phone_levels)))
+  prob_group <- ftrain[,.N,by=group]
+  prob_group[,prob:=N/sum(N)]
+  setkey(prob_group,"group")
+  dtree.model <- C5.0(as.data.frame(ftrain.frame[,-1]),ftrain.frame[,1])
+  predict_bench9[which(obs==i),] <- predict(dtree.model,newdata=ftest.frame)
+  na.rows <- unique(which(is.na(predict_bench9[which(obs==i),]),arr.ind = TRUE)[,1])
+  predict_bench9[which(obs==i),][na.rows,] <- rep(prob_group[,prob],each=length(na.rows))
+}
+```
+
+Neither does the naive bayes approach with device model as a predictor which has a logloss value of `r MultiLogLoss(observed_values,predict_bench7)`.
+
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+events <- fread("events.csv",colClasses = c("character","character","character","numeric","numeric"))
+events[,timestamp:=parse_datetime(timestamp,"%Y-%m-%d %H:%M:%S")]
+setkeyv(events,c("event_id","device_id"))
+app.events <- fread("app_events.csv",colClasses = c("character","character","integer","integer"))
+setkeyv(app.events,c("event_id","app_id"))
+app.labels <- fread("app_labels.csv",colClasses = c("character","character"))
+app.labels <- unique(app.labels)
+setkeyv(app.labels,c("app_id","label_id"))
+label.categories <- fread("label_categories.csv",colClasses = c("character","character"))
+setkey(label.categories,"label_id")
+
+
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+app.labels[,':='(uLabel=n_distinct(label_id),totLabel=length(label_id)),by=app_id]
+
+app.labels[uLabel<totLabel] # To check if there are any duplicates left.
+
+app.labels[,':='(uLabel=NULL,totLabel=NULL)]
+app.labels<-merge(app.labels,label.categories,by="label_id",allow.cartesian = TRUE,all.x=TRUE)[order(app_id,label_id)]
+# app.labels[,adjacent:=1]
+# app.labels[,category:=paste0("category: ",category)]
+app.labels[,label_id:=NULL]
+# app.labels <- dcast(app.labels,app_id~category,value.var = "adjacent")
+
+app.labels <- app.labels[,.(categories=paste0(category,collapse = ",")),by=app_id]
+setkey(app.labels,"app_id")
+```
+
+```{r preparation,echo=FALSE,warning=FALSE,message=FALSE}
+app.events[,categories:=app.labels[app_id,categories]]
+
+events <- merge(events,app.events,by="event_id",all.x=TRUE,allow.cartesian = TRUE)
+
+rm(app.events,app.labels)
+```
+
+
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+events <- events[complete.cases(events)]
+setkeyv(events,c("event_id","device_id","app_id"))
+
+events.activity <- events[,.(activity=sum(is_active)/sum(is_installed)),by=.(device_id,app_id)]
+
+events.activity[,app_id:=paste0("App: ",app_id)]
+setkeyv(events.activity,c("device_id","app_id"))
+
+
+# reduce to device ids (removed timstamp and location identifiers)
+events.categories <- events[,.(device_id,categories,is_active)]
+events.apps <- events[,.(device_id,app_id,is_active)]
+rm(events)
+
+events.categories <- events.categories[,.(tot_active=sum(is_active)),by=.(device_id,categories)]
+setkey(events.categories,device_id)
+setkey(events.apps,device_id)
+```
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+
+brand.categories <- train_brand
+brand.categories <- merge(brand.categories,events.categories,by="device_id",allow.cartesian = TRUE,all.x=TRUE)
+
+brand.categories <- brand.categories[complete.cases(brand.categories)]
+temp.categories <- strsplit(brand.categories$categories,",")
+brand.categories.expand <- data.table(device_id=rep(brand.categories$device_id,times=sapply(temp.categories,length)),tot_active=rep(brand.categories$tot_active,times=sapply(temp.categories,length)),category=unlist(temp.categories))
+brand.categories.expand[,category:=paste0("Category: ",category)]
+
+```
+
+```{r convertMatrix,echo=FALSE,warning=FALSE,message=FALSE}
+require(Matrix)
+
+device_brand <- brand.categories[,.(device_id,phone_brand)]
+device_brand <- unique(device_brand)
+device_brand[,':='(phone_brand=paste0("Phone brand: ",phone_brand),value=1)]
+device_brand <- dcast(device_brand,device_id~phone_brand,fill=0,value.var = "value")
+
+device_model <- brand.categories[,.(device_id,device_model)]
+device_model <- unique(device_model)
+device_model[,':='(device_model=paste0("Device model: ",device_model),value=1)]
+device_model<- dcast(device_model,device_id~device_model,fill=0,value.var = "value")
+
+device_categories <- dcast(unique(brand.categories.expand),device_id~category,value.var="tot_active",fun.aggregate = mean,na.rm=TRUE,fill=0)
+
+device_join <- merge(device_brand,merge(device_model,device_categories,by="device_id",all.x = TRUE),by="device_id",all.x=TRUE)
+
+device_matrix <- as.matrix(device_join[,-1,with=FALSE])
+device_matrix <- Matrix(device_matrix,sparse = TRUE)
+rownames(device_matrix) <- device_join$device_id
+
+device_labels <- train[device_join$device_id,group]
+names(device_labels) <- rownames(device_matrix)
+device_labels <- factor(device_labels)
+```
+
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+require(xgboost)
+
+ftrain <- xgb.DMatrix(device_matrix,label=as.integer(device_labels)-1,missing=NA)
+
+
+depth <- 7
+shrk <- 0.01
+ntree <- 120
+
+param <- list(booster="gblinear",
+              num_class=length(group_name),
+              objective="multi:softprob",
+              eval_metric="mlogloss",
+              eta=shrk,
+              max.depth=depth,
+              lambda=0.5,
+              lambda_bias=0.5,
+              alpha=0.5,
+              subsample=0.6,
+              colsample_bytree=0.6,
+              num_parallel_tree=2)
+watchlist <- list(train=ftrain)
+
+set.seed(114)
+fit_cv <- xgb.cv(params=param,
+                 data=ftrain,
+                 nrounds=ntree*100000,
+                 watchlist=watchlist,
+                 nfold=5,
+                 early.stop.round=10,
+                 verbose=1,
+                 verbose.eval=TRUE)
+
+fit_xgb <- xgb.train(params=param,
+                     data=ftrain,
+                     nrounds=ntree,
+                     watchlist=watchlist,
+                     verbose=1)
+
+test.data <- fread("gender_age_test.csv",colClasses = c("character"))
+predict(fit_xgb,test.data$device_id)
+
+
+
+```
+
+
+
+```{r,echo=FALSE,warning=FALSE,message=FALSE}
+device.app.brand <- merge(brand,events.activity,by="device_id",all.y=TRUE)
+device.app.brand[,':='(phone_brand=paste0("Brand: ",phone_brand),device_model=paste0("Model: ",device_model))]
+
+unique_devices <- device.app.brand[,device_id] %>% unique()
+unique_apps <- device.app.brand[,app_id] %>% unique()
+unique_brands <- device.app.brand[,phone_brand] %>% unique()
+unique_models <- device.app.brand[,device_model] %>% unique()
+
+id_devices <- match(device.app.brand[,device_id],unique_devices)
+id_apps <- match(device.app.brand[,app_id],unique_apps)
+id_comb.apps <- cbind(id_devices,id_apps)
+device_app.matrix <- Matrix(0,nrow=length(unique_devices),ncol=length(unique_apps),sparse = TRUE,dimnames = list(unique_devices,unique_apps))
+device_app.matrix[id_comb.apps] <- 1
+device_app_activity.matrix <- Matrix(0,nrow=length(unique_devices),ncol=length(unique_apps),sparse = TRUE,dimnames = list(unique_devices,paste("Activity: ", unique_apps)))
+
+device_app_activity.matrix[id_comb.apps] <- events.activity[,activity]
+
+id_brands <- match(device.app.brand[,phone_brand],unique_brands)
+id_comb.brands <- unique(cbind(id_devices,id_brands))
+device_brand.matrix <- Matrix(0,nrow=length(unique_devices),ncol=length(unique_brands),sparse = TRUE,dimnames = list(unique_devices,unique_brands))
+device_brand.matrix[id_comb.brands] <- 1
+
+id_models <- match(device.app.brand[,device_model],unique_models)
+id_comb.models <- unique(cbind(id_devices,id_models))
+device_model.matrix <- Matrix(0,nrow=length(unique_devices),ncol=length(unique_models),sparse = TRUE,dimnames = list(unique_devices,unique_models))
+device_model.matrix[id_comb.models] <- 1
+
+X_matrix <- cbind(device_brand.matrix,device_model.matrix,device_app.matrix,device_app_activity.matrix)
+
+Y <- train[rownames(X_matrix),group]
+
+X_train <- X_matrix[which(!is.na(Y)),]
+Y_train <- Y[which(!is.na(Y))]
+Y_train <- factor(Y_train)
+
+
+
+ftrain <- xgb.DMatrix(X_train,label=as.integer(Y_train)-1,missing=NA)
+
+
+depth <- 8
+shrk <- 0.01
+ntree <- 120
+
+param <- list(booster="gblinear",
+              num_class=length(unique(Y_train)),
+              objective="multi:softprob",
+              eval_metric="mlogloss",
+              eta=shrk,
+              max.depth=depth,
+              lambda=0.5,
+              lambda_bias=0.5,
+              alpha=0.5,
+              subsample=0.6,
+              colsample_bytree=0.6,
+              num_parallel_tree=2)
+watchlist <- list(train=ftrain)
+
+set.seed(114)
+fit_cv <- xgb.cv(params=param,
+                 data=ftrain,
+                 nrounds=ntree*100000,
+                 watchlist=watchlist,
+                 nfold=5,
+                 early.stop.round=10,
+                 verbose=1,
+                 verbose.eval=TRUE)
+
+
+fit_xgb <- xgb.train(params=param,
+                     data=ftrain,
+                     nrounds=ntree,
+                     watchlist=watchlist,
+                     verbose=1)
+
+
+
+
+```
+
+```{r,echo=FALSE,message=FALSE,warning=FALSE}
+
+```
+
+

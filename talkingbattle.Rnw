@@ -1,0 +1,292 @@
+\documentclass[paper=a4, fontsize=12pt]{scrartcl}
+\usepackage[T1]{fontenc}
+\usepackage{fourier}
+\usepackage{setspace}
+\usepackage{wrapfig}
+\usepackage{varwidth}% http://ctan.org/pkg/varwidth
+\usepackage{subcaption}
+\usepackage{geometry}
+\geometry{lmargin=1in,rmargin=1in}
+\usepackage{alltt}
+\usepackage{multicol}
+
+\usepackage[english]{babel}															% English language/hyphenation
+\usepackage[protrusion=true,expansion=true]{microtype}	
+\usepackage{amsmath,amsfonts,amsthm} % Math packages
+\usepackage[pdftex]{graphicx}	
+\usepackage{url}
+\usepackage{placeins}
+
+
+%%% Customizing Figure
+%%% Custom caption referencing 
+\captionsetup{subrefformat=parens}
+
+
+%%% Custom sectioning
+\usepackage{sectsty}
+\allsectionsfont{\centering \normalfont\scshape}
+
+%%% Custom headers/footers (fancyhdr package)
+\usepackage{fancyhdr}
+\pagestyle{fancyplain}
+\fancyhead{}											% No page header
+\fancyfoot[L]{}											% Empty 
+\fancyfoot[C]{}											% Empty
+\fancyfoot[R]{\thepage}									% Pagenumbering
+\renewcommand{\headrulewidth}{0pt}			% Remove header underlines
+\renewcommand{\footrulewidth}{0pt}				% Remove footer underlines
+\setlength{\headheight}{13.6pt}
+
+
+%%% Equation and float numbering
+
+
+
+%%% Maketitle metadata
+\newcommand{\horrule}[1]{\rule{\linewidth}{#1}} 	% Horizontal rule
+
+\title{
+		\vspace{-1in} 	
+		\usefont{OT1}{bch}{b}{n}
+		\normalfont \normalsize \textsc{Talking Data} \\ [25pt]
+		\horrule{0.5pt} \\[0.4cm]
+		\Large Forecasting Project\\
+		\horrule{2pt} \\[0.5cm]
+}
+\author{
+		\normalfont 								\normalsize
+        Aditya Gore\\[-3pt]		\normalsize
+        \today
+}
+\date{}
+
+
+
+\begin{document}
+\SweaveOpts{concordance=TRUE}
+\maketitle
+
+
+
+<<label=formatting,echo=FALSE>>=
+# Loading required packagesoptions(width=40,digits=3)
+options(width=60)
+# Loading data
+
+@
+
+<<label=loaddata,echo=FALSE,results=hide>>=
+train <- read_csv("gender_age_train.csv")
+train <- train %>% mutate(device_id=as.character(device_id),gender=factor(gender),group=factor(group))
+brand <- read_csv("phone_brand_device_model.csv")
+brand <- brand %>% mutate(phone_brand=factor(phone_brand),device_model=factor(device_model),device_id=as.character(device_id))
+brand <- unique(brand)
+events <- read_csv("events.csv")
+events <- events %>% mutate(device_id=as.character(device_id))
+app.events <- read_csv("app_events.csv")
+app.events <- app.events %>% mutate(app_id = as.character(app_id))
+app.labels <- read_csv("app_labels.csv")
+app.labels <- app.labels %>% mutate(app_id=as.character(app_id))
+
+label.categories <- read_csv("label_categories.csv")
+@
+
+<<label=loaddatatable,echo=FALSE,results=hide>>=
+train <- fread("gender_age_train.csv",colClasses = c("character","factor","integer","factor"))
+setkey(train,"device_id")
+# train <- train %>% mutate(device_id=as.character(device_id),gender=factor(gender),group=factor(group))
+brand <- fread("phone_brand_device_model.csv",colClasses = c("character","character","character"),encoding = "UTF-8")
+# brand <- brand %>% mutate(phone_brand=factor(phone_brand),device_model=factor(device_model),device_id=as.character(device_id))
+brand <- unique(brand)
+setkey(brand,"device_id")
+brand[,.(brands=n_distinct(phone_brand)),by=device_model][,.N,by=brands][order(brands)]
+brand[,device_model:=paste(phone_brand,device_model)]
+events <- fread("events.csv",colClasses = c("integer","character","character","numeric","numeric"))
+events[,timestamp:=parse_datetime(timestamp,"%Y-%m-%d %H:%M:%S")]
+setkeyv(events,c("event_id","device_id"))
+# events <- events %>% mutate(device_id=as.character(device_id))
+app.events <- fread("app_events.csv",colClasses = c("integer","character","integer","integer"))
+setkeyv(app.events,c("event_id","app_id"))
+# app.events <- app.events %>% mutate(app_id = as.character(app_id))
+app.labels <- fread("app_labels.csv",colClasses = c("character","integer"))
+# app.labels <- app.labels %>% mutate(app_id=as.character(app_id))
+setkeyv(app.labels,c("app_id","label_id"))
+app.labels <- unique(app.labels)
+label.categories <- fread("label_categories.csv")
+setkey(label.categories,"label_id")
+
+
+# Function to merge data sets
+devicemerge <- function(x,y) merge(x,y,by="device_id",all=FALSE)
+@
+
+
+<<label=basicmaps>>=
+ggmap(get_googlemap(center = c(lon=mean(events$longitude),lat=mean(events$latitude)),maptype = "hybrid",size = c(640,480),zoom = 4))
+ggmap(get_map(location="China",zoom = 3))
+ggplot(map_data("world",c("China","India","Bangladesh","Burma","Pakistan")), aes(x = long, y = lat, group = group)) + geom_polygon(fill = "white", colour = "black")
+
+ggmap(get_openstreetmap(bbox = c(left = min(events$longitude), bottom = min(events$longitude), right = max(events$longitude), top = max(events$latitude)),color = "bw",urlonly = TRUE))
+
+@
+
+
+<<label=basiplots>>=
+ggplot(train,aes(x=group))+geom_bar()+facet_wrap(~gender,drop = TRUE,scales="free_x")+theme_bw()
+
+@
+
+<<label=missingorduplicates>>=
+train_brand <- brand %>% merge(train,by="device_id",all.x=FALSE,all.y=TRUE)
+
+# Number of apps on devices by events.
+eventsjoinapps <- app.events %>% merge(events,by="event_id",all.x=FALSE,all.y = TRUE)
+@
+
+<<label=datatableoperations>>=
+
+# eventsjoinapps <- merge(app.events,events,by="event_id",all=FALSE)
+# eventsjoinapps[,':='(apps=n_distinct(app_id),tot_installed=sum(is_installed),tot_active=sum(is_active)),by=.(device_id,timestamp)]
+
+label.categories[app.labels[,label_id],.N,by=category][1:15,]%>%ggplot(aes(x=reorder(category,-N),y=N))+geom_bar(stat="identity")
+
+alljoin <- app.events %>% merge(events %>% merge(train %>% merge(brand,by="device_id",all=FALSE), by="device_id",all=FALSE), by="event_id",all=FALSE)
+
+setkeyv(alljoin,c("event_id","app_id","device_id","timestamp","phone_brand"))
+
+alljoin[,.(tot_active=sum(is_active)),by=.(device_id,gender,group,timestamp,longitude,latitude)] %>% ggplot(aes(x=factor(timestamp),y=tot_active))+geom_line(aes(color=group))
+
+alljoin[,.(tot_active=sum(is_active),tot_installed=sum(is_installed)),by=.(device_id,app_id,gender,group,timestamp,longitude,latitude)]
+
+alljoin[,.(tot_active=sum(is_active),tot_installed=sum(is_installed)),by=.(device_id,app_id,gender,group,timestamp,longitude,latitude)][tot_installed>1,.N,by=.(gender,group)][order(N)] %>% ggplot(aes(x=group,y=N)) + geom_bar(stat="identity",aes(fill=gender))
+
+alljoin[,.(tot_device=n_distinct(device_id)),by=phone_brand][(order(-tot_device))<16] %>% ggplot(aes(x=reorder(phone_brand,tot_device),y=tot_device))+geom_bar(stat="identity")+theme_bw()+coord_flip()
+@
+
+<<label=spatialvisualization>>=
+map1 <- borders("world",regions="china",col="gray10",fill="gray10")
+map2 <- borders("world",regions="taiwan",col="gray10",fill="gray10")
+map3 <- borders("world",col="gray10",fill="gray10")
+ggplot()+map1+map2+
+  geom_point(aes(x=longitude,y=latitude),
+             data=events[sample(.N,100000)],
+             col="blue",alpha=0.1,size=0.2)+
+  scale_x_continuous("",breaks=NULL,limits=range(map1$data$long))+
+  scale_y_continuous("",breaks=NULL,limits=range(map1$data$lat))+
+  theme(panel.background=element_rect(fill="gray30",colour="gray30"))
+
+ggplot()+map3+ geom_point(aes(x=longitude,y=latitude), data=events[sample(.N,100000)], col="blue",alpha=0.1,size=0.2)+ scale_x_continuous("",breaks=NULL,limits=range(map3$data$long))+ scale_y_continuous("",breaks=NULL,limits=range(map3$data$lat))+ theme(panel.background=element_rect(fill="gray30",colour="gray30"))
+
+ggplot()+map3+ geom_point(aes(x=longitude,y=latitude), data=events[sample(.N,100000)], col="blue",alpha=0.1,size=0.2)+ scale_x_continuous("",breaks=NULL,limits=range(map3$data$long))+ scale_y_continuous("",breaks=NULL,limits=range(map3$data$lat))+ theme(panel.background=element_rect(fill="gray30",colour="gray30"))
+
+
+ggplot()+map1+geom_point(aes(x=longitude,y=latitude,color=gender), data=devicemerge(events[sample(.N,100000)],train),alpha=0.1,size=0.2)+ scale_x_continuous("",breaks=NULL,limits=range(map1$data$long))+ scale_y_continuous("",breaks=NULL,limits=range(map1$data$lat))+ theme(panel.background=element_rect(fill="gray30",colour="gray30"))
+
+ggplot()+map1+geom_point(aes(x=longitude,y=latitude,color=gender), data=devicemerge(events[sample(.N,100000)],train),alpha=0.1,size=0.2)+ scale_x_continuous("",breaks=NULL,limits=range(map1$data$long))+ scale_y_continuous("",breaks=NULL,limits=range(map1$data$lat))+ theme(panel.background=element_rect(fill="gray30",colour="gray30"))+facet_wrap(~gender)+scale_color_brewer(palette = "Set1")
+
+@
+
+<<label=appinvestigation>>=
+print(alljoin[,.(tot_apps=n_distinct(app_id),tot_installed=sum(is_installed),tot_active=sum(is_active)),by=.(device_id,timestamp,longitude,latitude,gender,phone_brand,device_model)][order(-tot_apps)],topn=30)
+
+
+print(alljoin[,.(tot_apps=n_distinct(app_id),tot_installed=sum(is_installed),tot_active=sum(is_active)),by=.(device_id,timestamp,longitude,latitude,gender,phone_brand,device_model)][,.(avg_apps=mean(tot_apps),avg_installed=mean(tot_installed),avg_active=mean(tot_active)),by=.(device_id,longitude,latitude,gender,phone_brand,device_model)][order(-avg_apps)],topn=30)
+
+# alljoin[,.(tot_apps=n_distinct(app_id),tot_installed=sum(is_installed),tot_active=sum(is_active)),by=.(device_id,timestamp,longitude,latitude,gender,phone_brand,device_model)][sample(.N,10000)]%>% ggplot(aes(x=timestamp))+geom_line(aes(y=tot_apps,color=gender,group=device_id))
+
+
+@
+
+<<label=combineall>>=
+app.categories <- merge(app.labels,label.categories,by="label_id",all=FALSE)
+
+setkeyv(app.categories,c("app_id"))
+
+# newalljoin <- merge(alljoin,merge(app.labels,label.categories,by="label_id",all=FALSE),by="app_id",all=FALSE,allow.cartesian = TRUE)
+
+# Another plot
+app.categories[alljoin[,app_id],allow.cartesian=TRUE][,.N,by=category][order(-N)][1:20] %>% ggplot(aes(x=reorder(category,N),y=N))+geom_bar(stat="identity") + coord_flip()+theme_bw()
+
+# Second attempt at newjoin
+newalljoin <- merge(alljoin[,.(app_id,device_id,gender,age,group,timestamp)],app.categories,by="app_id",all=FALSE,allow.cartesian = TRUE)
+
+
+
+
+@
+
+<<label=firstmlmodel>>=
+gbm1 <- alljoin[,.(device_id=factor(device_id),app_id=factor(app_id),phone_brand=factor(phone_brand),device_model=factor(device_model),group=factor(group))] %>% gbm(group ~ device_id+app_id+phone_brand+device_model,data=.,n.trees = 1000,shrinkage = 0.05,interaction.depth = 1,bag.fraction = .5,train.fraction = .5,cv.folds = 5,n.cores=2,distribution = "multinomial")
+@
+
+
+<<label=pythonexample>>=
+
+train[,.N,by=group] %>% ggplot(aes(x=group,y=N))+geom_bar(stat="identity",fill="darkorange")+theme_bw()+coord_flip()
+
+train[,.N,by=gender] %>% ggplot(aes(x=gender,y=N))+geom_bar(stat="identity",fill="darkorange")+theme_bw()+coord_flip()
+
+train[,.N,by=.(gender,age)] %>% ggplot(aes(x=age,y=N))+geom_bar(stat="identity",aes(fill=gender))+facet_wrap(~gender,scales = "free_y",ncol=1)+theme_bw()+scale_x_continuous(breaks=seq(0,100,5))
+
+pred1 <- matrix(data=1,ncol=n_distinct(train[,group]),nrow=train[,.N])/n_distinct(train[,group])
+
+act <- model.matrix(~train[,group]-1)
+@
+
+<<label=lossfunction>>=
+MultiLogLoss <- function(act, pred){
+      eps <- 1e-15;
+      nr <- nrow(pred)
+      pred <- matrix(sapply( pred, function(x) max(eps,x)), nrow = nr)      
+      pred <- matrix(sapply( pred, function(x) min(1-eps,x)), nrow = nr)
+      ll <- sum(act*log(pred) + (1-act)*log(1-pred))
+      ll <- ll * (-1/(nrow(act)))      
+      return(ll);
+}
+
+@
+
+<<label=pymodel2>>=
+folds <- 10
+obs <- sample(c(1:folds),train[,.N],replace = TRUE)
+pred2 <- matrix(0,nrow=train[,.N],ncol=n_distinct(train[,group]))
+train[,group:=factor(group)]
+for(i in 1:folds){
+  ftrain <- train[which(obs==i)]
+  ftest <- train[which(obs!=i)]
+  prob <- ftrain[,.N,by=group][order(as.integer(group)),N]/ftrain[,.N]
+  pred2[which(obs!=i),]<- rep(prob,each=sum(obs!=i))
+}
+
+MultiLogLoss(act,pred2)
+MultiLogLoss(act,pred1)
+
+@
+
+<<label=model1>>=
+alljoin[,.(tot_apps=n_distinct(app_id)),by=.(gender,age,group,phone_brand,device_model)] %>% ggplot(aes(x=gender,y=tot_apps))+geom_boxplot()+facet_wrap(~phone_brand,scales="free_y")+theme_bw()
+
+alljoin[,.(tot_apps=n_distinct(app_id)),by=.(gender,age)][order(gender,age)] %>% as.data.frame() %>% ggplot(aes(x=age,y=tot_apps))+geom_bar(stat="identity",aes(fill=gender),position="fill")+theme_bw()+scale_x_continuous(breaks = seq(10,90,5),minor_breaks = seq(12.5,87.5,5))
+@
+
+<<label=brandcheck>>=
+# brand.duplicates <- brand[duplicated(brand),device_id]
+# brand[brand.duplicates,.N,by=.(device_id,phone_brand,device_model)][N<2]
+
+@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\end{document}
