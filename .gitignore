@@ -338,5 +338,6 @@ xgboost/
 ### Custom files to ignore
 *.txt
 *.png
+*.html
 newalljoin*
 rmarkdown*
